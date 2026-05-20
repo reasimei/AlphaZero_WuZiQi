@@ -1,2 +1,8 @@
 *.pyc
 __pycache__/
+.matplotlib/
+.vendor/
+artifacts/
+course_outputs/
+.codex_conda_home/
+.codex_xdg/

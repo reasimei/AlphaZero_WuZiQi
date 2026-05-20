@@ -5,6 +5,7 @@
 
 from __future__ import print_function
 import numpy as np
+from heuristic_reward import compute_heuristic_reward
 
 
 class Board(object):
@@ -159,7 +160,8 @@ class Game(object):
                     print('_'.center(8), end='')
             print('\r\n\r\n')
 
-    def start_play(self, player1, player2, start_player=0, is_shown=1):
+    def start_play(self, player1, player2, start_player=0, is_shown=1,
+                   recorder=None):
         """start a game between two players"""
         if start_player not in (0, 1):
             raise Exception('start_player should be either 0 (player1 first) '
@@ -171,6 +173,8 @@ class Game(object):
         players = {p1: player1, p2: player2}
         if is_shown:
             self.graphic(self.board, player1.player, player2.player)
+        if recorder:
+            recorder.capture(self.board, player1.player, player2.player)
         while True:
             current_player = self.board.get_current_player()
             player_in_turn = players[current_player]
@@ -178,6 +182,8 @@ class Game(object):
             self.board.do_move(move)
             if is_shown:
                 self.graphic(self.board, player1.player, player2.player)
+            if recorder:
+                recorder.capture(self.board, player1.player, player2.player)
             end, winner = self.board.game_end()
             if end:
                 if is_shown:
@@ -185,15 +191,24 @@ class Game(object):
                         print("Game end. Winner is", players[winner])
                     else:
                         print("Game end. Tie")
+                if recorder:
+                    recorder.finish(winner)
                 return winner
 
-    def start_self_play(self, player, is_shown=0, temp=1e-3):
+    def start_self_play(self, player, is_shown=0, temp=1e-3,
+                        reward_shaping=None):
         """ start a self-play game using a MCTS player, reuse the search tree,
         and store the self-play data: (state, mcts_probs, z) for training
         """
         self.board.init_board()
         p1, p2 = self.board.players
         states, mcts_probs, current_players = [], [], []
+        heuristic_rewards = []
+        heuristic_totals = {
+            "open_three": 0,
+            "open_four": 0,
+            "five": 0,
+        }
         while True:
             move, move_probs = player.get_action(self.board,
                                                  temp=temp,
@@ -203,7 +218,17 @@ class Game(object):
             mcts_probs.append(move_probs)
             current_players.append(self.board.current_player)
             # perform a move
+            move_player = self.board.current_player
             self.board.do_move(move)
+            if reward_shaping and reward_shaping.get("enabled"):
+                reward_bonus, reward_detail = compute_heuristic_reward(
+                    self.board, move_player, reward_shaping
+                )
+                heuristic_rewards.append(reward_bonus)
+                for key in heuristic_totals:
+                    heuristic_totals[key] += reward_detail["player_counts"][key]
+            else:
+                heuristic_rewards.append(0.0)
             if is_shown:
                 self.graphic(self.board, p1, p2)
             end, winner = self.board.game_end()
@@ -213,6 +238,14 @@ class Game(object):
                 if winner != -1:
                     winners_z[np.array(current_players) == winner] = 1.0
                     winners_z[np.array(current_players) != winner] = -1.0
+                shaped_z = winners_z
+                if reward_shaping and reward_shaping.get("enabled"):
+                    shaped_z = np.clip(
+                        winners_z + reward_shaping["shaping_weight"] *
+                        np.array(heuristic_rewards, dtype=np.float32),
+                        -1.0,
+                        1.0,
+                    )
                 # reset MCTS root node
                 player.reset_player()
                 if is_shown:
@@ -220,4 +253,17 @@ class Game(object):
                         print("Game end. Winner is player:", winner)
                     else:
                         print("Game end. Tie")
-                return winner, zip(states, mcts_probs, winners_z)
+                episode_info = {
+                    "episode_len": len(current_players),
+                    "avg_heuristic_reward": float(np.mean(heuristic_rewards))
+                    if heuristic_rewards else 0.0,
+                    "max_heuristic_reward": float(np.max(heuristic_rewards))
+                    if heuristic_rewards else 0.0,
+                    "open_three_count": int(heuristic_totals["open_three"]),
+                    "open_four_count": int(heuristic_totals["open_four"]),
+                    "five_count": int(heuristic_totals["five"]),
+                    "shaping_enabled": bool(
+                        reward_shaping and reward_shaping.get("enabled")
+                    ),
+                }
+                return winner, zip(states, mcts_probs, shaped_z), episode_info
